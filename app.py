@@ -56,7 +56,7 @@ if "messages" not in st.session_state:
         }
     ]
 
-file_path = r"C:\Users\Kuck\Documents\AI\demo\workaw_chatbot\workaw\workaw_data.xlsx"
+file_path = r"workaw_data.xlsx"
 try:
     df = pd.read_excel(file_path)
     file_content = df.to_string(index=False)
