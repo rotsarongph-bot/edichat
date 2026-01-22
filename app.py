@@ -1,19 +1,3 @@
-# app.py
-# ✅ เวอร์ชัน “ตอบได้ดีที่สุดแบบเดิม” + เก็บประวัติแชทลง SQLite
-# ✅ เปิดดูประวัติ / ดาวน์โหลด CSV / สถิติพื้นฐาน
-# ✅ Export CSV ไม่ขาด (QUOTE_ALL + utf-8-sig) + เลือก export ได้ (ทั้งหมด/ปัจจุบัน/ที่เลือก)
-# ✅ Recent sessions แสดงเป็น “คำถามแรกของแต่ละ Session” (แทนการโชว์แค่ session id)
-# ✅ Avatar: model = 🤖, user = 🧑
-#
-# ติดตั้ง:
-#   pip install streamlit pandas openpyxl python-dotenv google-generativeai
-# รัน:
-#   streamlit run app.py
-#
-# หมายเหตุ:
-# - ต้องมี prompt.py และตัวแปร PROMPT_WORKAW
-# - ต้องมี GOOGLE_API_KEY ใน .env หรือ Environment Variables
-
 import os
 import uuid
 import sqlite3
@@ -32,7 +16,7 @@ from prompt import PROMPT_WORKAW
 dotenv.load_dotenv()
 
 # =========================
-# AVATAR (แก้ตรงนี้จุดเดียว)
+# AVATAR
 # =========================
 BOT_AVATAR = "🤖"
 USER_AVATAR = "🧑"
@@ -70,7 +54,7 @@ model = genai.GenerativeModel(
 )
 
 # =========================
-# 1) SQLITE: เก็บประวัติแชท
+# 1) SQLITE
 # =========================
 DB_PATH = "workaw_chat.db"
 
@@ -109,6 +93,7 @@ def db_add_message(session_id: str, role: str, content: str):
 
 
 def db_load_messages(session_id: str, limit: int = 300):
+    """โหลดทั้ง user+model (ไว้แสดงประวัติแบบเต็ม)"""
     with db_conn() as conn:
         cur = conn.cursor()
         cur.execute(
@@ -132,17 +117,23 @@ def db_clear_session(session_id: str):
         conn.commit()
 
 
-def db_list_sessions(limit: int = 50):
+def db_list_sessions(limit: int = 50, user_turns_eq: int | None = None):
     """
-    คืนค่าเป็นรายการ session พร้อม:
-    - last_ts
-    - user_turns / model_turns
-    - first_question (คำถามแรกของ session)
+    คืนค่า session พร้อม first_question
+    ถ้าส่ง user_turns_eq=1 => จะได้เฉพาะ session ที่ user_turns == 1 (user:1 เท่านั้น)
     """
+    where_clause = ""
+    params = []
+    if user_turns_eq is not None:
+        where_clause = "WHERE s.user_turns = ?"
+        params.append(user_turns_eq)
+
+    params.append(limit)
+
     with db_conn() as conn:
         cur = conn.cursor()
         cur.execute(
-            """
+            f"""
             WITH sessions AS (
                 SELECT
                     session_id,
@@ -173,10 +164,11 @@ def db_list_sessions(limit: int = 50):
                 COALESCE(f.first_question, '') AS first_question
             FROM sessions s
             LEFT JOIN first_user_msg f ON s.session_id = f.session_id
+            {where_clause}
             ORDER BY s.last_ts DESC
             LIMIT ?
             """,
-            (limit,),
+            tuple(params),
         )
         rows = cur.fetchall()
     return rows
@@ -202,11 +194,6 @@ def db_export_session_as_df(session_id: str):
 
 
 def df_to_csv_bytes(df: pd.DataFrame) -> bytes:
-    """
-    แก้ปัญหา “CSV ดูไม่ครบ” ใน Excel/Sheets:
-    - content มี , หรือขึ้นบรรทัดใหม่ -> ถ้าไม่ quote ทั้งหมด จะทำให้แถวแตก/เหมือนข้อมูลหาย
-    - ใช้ QUOTE_ALL + utf-8-sig
-    """
     buf = BytesIO()
     df.to_csv(
         buf,
@@ -231,13 +218,12 @@ init_db()
 st.set_page_config(page_title="EDI Chatbot", page_icon="💬")
 st.title("💬 น้องนวัตกรรม สวัสดีค่ะ")
 
-# สร้าง session_id (ผูกกับผู้ใช้ในเบราว์เซอร์นี้)
 if "session_id" not in st.session_state:
     st.session_state.session_id = str(uuid.uuid4())
 session_id = st.session_state.session_id
 
 # =========================
-# 3) LOAD KB (Excel) แบบเดิม
+# 3) LOAD KB (Excel)
 # =========================
 file_path = r"workaw_data.xlsx"
 try:
@@ -248,7 +234,7 @@ except Exception as e:
     st.stop()
 
 # =========================
-# Sidebar: ควบคุมและดูประวัติ
+# Sidebar
 # =========================
 with st.sidebar:
     st.subheader("🧾 Chat History (SQLite)")
@@ -265,22 +251,23 @@ with st.sidebar:
 
     st.markdown("---")
 
-    # เลือก session เพื่อดูย้อนหลัง (โชว์คำถามแรกของแต่ละ session)
-    sessions = db_list_sessions(limit=50)
+    # ✅ Recent sessions: แสดงเฉพาะ user:1 เท่านั้น (รายการ select)
+    sessions_for_select = db_list_sessions(limit=200, user_turns_eq=1)
+
     chosen_sid = None
-    if sessions:
+    if sessions_for_select:
         st.write("**Recent sessions**")
 
         session_choices = [
-            f"📝 {shorten(first_q)} | {last_ts} | user:{ut} model:{mt} | {sid[:8]}…"
-            for sid, first_ts, last_ts, ut, mt, first_q in sessions
+            f"📝 {shorten(first_q)} | {last_ts} | user:{ut} | {sid[:8]}…"
+            for sid, first_ts, last_ts, ut, mt, first_q in sessions_for_select
         ]
+
         chosen = st.selectbox("เลือก session เพื่อดูประวัติ", ["(current)"] + session_choices)
 
         if chosen != "(current)":
-            # label ลงท้ายด้วย " | <sid[:8]>…"
             sid_prefix = chosen.split("|")[-1].strip().replace("…", "")
-            for sid, *_ in sessions:
+            for sid, *_ in sessions_for_select:
                 if sid.startswith(sid_prefix):
                     chosen_sid = sid
                     break
@@ -289,11 +276,11 @@ with st.sidebar:
                 st.session_state["view_session_id"] = chosen_sid
                 st.rerun()
     else:
-        st.info("ยังไม่มีประวัติในฐานข้อมูล")
+        st.info("ยังไม่มี session ที่ user >= 1")
 
     st.markdown("---")
 
-    # ✅ Export CSV แบบเลือกได้
+    # Export CSV
     st.write("**Export CSV**")
     export_mode = st.radio(
         "ต้องการ export อะไร?",
@@ -309,7 +296,9 @@ with st.sidebar:
             file_name="workaw_chat_history_ALL.csv",
             mime="text/csv",
         )
-        st.caption(f"Rows: {len(export_df)} | Sessions: {export_df['session_id'].nunique() if len(export_df) else 0}")
+        st.caption(
+            f"Rows: {len(export_df)} | Sessions: {export_df['session_id'].nunique() if len(export_df) else 0}"
+        )
 
     elif export_mode == "Only current session":
         export_df = db_export_session_as_df(session_id)
@@ -336,7 +325,7 @@ with st.sidebar:
 
     st.markdown("---")
 
-    # Quick stats (จาก ALL)
+    # Quick stats
     st.write("**Quick stats (All)**")
     all_df = db_export_all_as_df()
     st.write(f"- Total messages: {len(all_df)}")
@@ -345,14 +334,14 @@ with st.sidebar:
         st.write(all_df["role"].value_counts())
 
 # =========================
-# 4) เลือกว่าจะ “แสดงแชท” จาก session ไหน
+# 4) VIEW SESSION (history)
 # =========================
 view_session_id = st.session_state.get("view_session_id", session_id)
-
-# โหลด messages ของ session ที่เลือกมาดู
 loaded = db_load_messages(view_session_id, limit=5000)
 
-# สร้าง session_state['messages'] สำหรับ session ปัจจุบัน
+# =========================
+# 5) init current messages
+# =========================
 if "messages" not in st.session_state:
     st.session_state["messages"] = [
         {"role": "model", "content": "สวัสดีค่ะ ต้องการสอบถามข้อมูลการรับสมัครส่วนไหนคะ"}
@@ -360,7 +349,7 @@ if "messages" not in st.session_state:
     db_add_message(session_id, "model", "สวัสดีค่ะ ต้องการสอบถามข้อมูลการรับสมัครส่วนไหนคะ")
 
 # =========================
-# 5) UI: โหมดดูประวัติ / โหมดคุย
+# 6) UI: โหมดดูประวัติ / โหมดคุย
 # =========================
 if view_session_id != session_id:
     st.info(f"กำลังดูประวัติ session: {view_session_id}")
@@ -368,6 +357,7 @@ if view_session_id != session_id:
         st.session_state["view_session_id"] = session_id
         st.rerun()
 
+    # ✅ แสดงเหมือนเดิม: ทั้ง user และ model
     for msg in loaded:
         if msg["role"] == "model":
             st.chat_message("model", avatar=BOT_AVATAR).write(msg["content"])
@@ -376,7 +366,7 @@ if view_session_id != session_id:
     st.stop()
 
 # =========================
-# 6) แสดงแชทของ current session (ใช้ avatar)
+# 7) แสดงแชทของ current session
 # =========================
 for msg in st.session_state["messages"]:
     if msg["role"] == "model":
@@ -385,7 +375,7 @@ for msg in st.session_state["messages"]:
         st.chat_message("user", avatar=USER_AVATAR).write(msg["content"])
 
 # =========================
-# 7) ส่งข้อความ + บันทึกลง DB
+# 8) chat input + save
 # =========================
 if prompt := st.chat_input():
     st.session_state["messages"].append({"role": "user", "content": prompt})
@@ -404,9 +394,7 @@ if prompt := st.chat_input():
             st.session_state["messages"].append({"role": "model", "content": reply})
             db_add_message(session_id, "model", reply)
         else:
-            # ✅ ใส่ไฟล์ฐานความรู้เหมือนเดิม (เวอร์ชันที่ตอบดีที่สุดของคุณ)
             history.insert(1, {"role": "user", "parts": [{"text": file_content}]})
-
             chat_session = model.start_chat(history=history)
             response = chat_session.send_message(prompt)
 
