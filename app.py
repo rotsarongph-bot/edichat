@@ -111,7 +111,7 @@ def db_load_messages(session_id: str, limit: int = 300):
 
 
 def db_load_user_messages(session_id: str, limit: int = 300):
-    """โหลดเฉพาะ role='user' (ใช้แสดงในหน้าประวัติ)"""
+    """โหลดเฉพาะ role='user' (ใช้แสดงในหน้าประวัติ ตามที่ขอ)"""
     with db_conn() as conn:
         cur = conn.cursor()
         cur.execute(
@@ -135,14 +135,12 @@ def db_clear_session(session_id: str):
         conn.commit()
 
 
-def db_list_sessions(limit: int = 50, user_min_turns: int = 1):
+def db_list_sessions(limit: int = 50):
     """
     คืนค่าเป็นรายการ session พร้อม:
     - last_ts
-    - user_turns / model_turns
+    - user_turns / model_turns (คงไว้ใน DB แต่ใน UI จะโชว์ user อย่างเดียว)
     - first_question (คำถามแรกของ session)
-    ✅ FILTER: แสดงเฉพาะ session ที่ user_turns >= user_min_turns
-       (ถ้า user_min_turns=1 => user:0 จะไม่ถูกนำมาแสดง)
     """
     with db_conn() as conn:
         cur = conn.cursor()
@@ -178,11 +176,10 @@ def db_list_sessions(limit: int = 50, user_min_turns: int = 1):
                 COALESCE(f.first_question, '') AS first_question
             FROM sessions s
             LEFT JOIN first_user_msg f ON s.session_id = f.session_id
-            WHERE s.user_turns >= ?
             ORDER BY s.last_ts DESC
             LIMIT ?
             """,
-            (user_min_turns, limit),
+            (limit,),
         )
         rows = cur.fetchall()
     return rows
@@ -245,7 +242,7 @@ session_id = st.session_state.session_id
 # =========================
 # 3) LOAD KB (Excel) แบบเดิม
 # =========================
-file_path = r"workaw_data.xlsx"
+file_path = r"C:\Users\Kuck\Documents\AI\demo\workaw_chatbot\workaw\workaw_data.xlsx"
 try:
     df_kb = pd.read_excel(file_path)
     file_content = df_kb.to_string(index=False)
@@ -271,19 +268,17 @@ with st.sidebar:
 
     st.markdown("---")
 
-    # ✅ เลือก session เพื่อดูย้อนหลัง (โชว์เฉพาะ session ที่ user_turns >= 1)
-    sessions = db_list_sessions(limit=50, user_min_turns=1)
+    # เลือก session เพื่อดูย้อนหลัง (โชว์คำถามแรกของแต่ละ session + โชว์ count เฉพาะ user)
+    sessions = db_list_sessions(limit=50)
     chosen_sid = None
-
     if sessions:
-        st.write("**Recent sessions (user>=1)**")
+        st.write("**Recent sessions**")
 
-        # label: แสดงคำถามแรก + เวลา + user:{ut} + sid prefix
+        # ✅ ปรับ label ให้โชว์ "user:{ut}" อย่างเดียว (ไม่โชว์ model)
         session_choices = [
             f"📝 {shorten(first_q)} | {last_ts} | user:{ut} | {sid[:8]}…"
             for sid, first_ts, last_ts, ut, mt, first_q in sessions
         ]
-
         chosen = st.selectbox("เลือก session เพื่อดูประวัติ", ["(current)"] + session_choices)
 
         if chosen != "(current)":
@@ -297,7 +292,7 @@ with st.sidebar:
                 st.session_state["view_session_id"] = chosen_sid
                 st.rerun()
     else:
-        st.info("ยังไม่มี session ที่มีคำถามจากผู้ใช้ (user>=1)")
+        st.info("ยังไม่มีประวัติในฐานข้อมูล")
 
     st.markdown("---")
 
@@ -377,8 +372,9 @@ if view_session_id != session_id:
         st.session_state["view_session_id"] = session_id
         st.rerun()
 
+    # ✅ แสดงเฉพาะ user
     if not loaded_user_only:
-        st.warning("Session นี้ไม่มีข้อความจากผู้ใช้ (user)")
+        st.warning("Session นี้ยังไม่มีข้อความจากผู้ใช้ (user)")
     else:
         for msg in loaded_user_only:
             st.chat_message("user", avatar=USER_AVATAR).write(msg["content"])
@@ -398,8 +394,11 @@ for msg in st.session_state["messages"]:
 # 7) ส่งข้อความ + บันทึกลง DB
 # =========================
 if prompt := st.chat_input():
+    # เพิ่มลง session_state
     st.session_state["messages"].append({"role": "user", "content": prompt})
     st.chat_message("user", avatar=USER_AVATAR).write(prompt)
+
+    # บันทึกลง SQLite (ยังเก็บเหมือนเดิม)
     db_add_message(session_id, "user", prompt)
 
     def generate_response():
@@ -414,7 +413,7 @@ if prompt := st.chat_input():
             st.session_state["messages"].append({"role": "model", "content": reply})
             db_add_message(session_id, "model", reply)
         else:
-            # ✅ ใส่ไฟล์ฐานความรู้เหมือนเดิม (เวอร์ชันที่ตอบดีที่สุด)
+            # ✅ ใส่ไฟล์ฐานความรู้เหมือนเดิม (เวอร์ชันที่ตอบดีที่สุดของคุณ)
             history.insert(1, {"role": "user", "parts": [{"text": file_content}]})
 
             chat_session = model.start_chat(history=history)
@@ -422,6 +421,8 @@ if prompt := st.chat_input():
 
             st.session_state["messages"].append({"role": "model", "content": response.text})
             st.chat_message("model", avatar=BOT_AVATAR).write(response.text)
+
+            # บันทึกคำตอบลง SQLite (ยังเก็บเหมือนเดิม)
             db_add_message(session_id, "model", response.text)
 
     generate_response()
