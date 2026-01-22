@@ -1,3 +1,21 @@
+# app.py
+# ✅ เวอร์ชัน “ตอบได้ดีที่สุดแบบเดิม” + เก็บประวัติแชทลง SQLite
+# ✅ เปิดดูประวัติ / ดาวน์โหลด CSV / สถิติพื้นฐาน
+# ✅ Export CSV ไม่ขาด (QUOTE_ALL + utf-8-sig) + เลือก export ได้ (ทั้งหมด/ปัจจุบัน/ที่เลือก)
+# ✅ Recent sessions แสดงเป็น “คำถามแรกของแต่ละ Session”
+# ✅ (ปรับตามที่ขอ) ในส่วน “ประวัติ” แสดงเฉพาะข้อความ role = 'user' เท่านั้น
+#     แต่ในฐานข้อมูลยังเก็บทั้ง user + model เหมือนเดิม
+# ✅ Avatar: model = 🤖, user = 🧑
+#
+# ติดตั้ง:
+#   pip install streamlit pandas openpyxl python-dotenv google-generativeai
+# รัน:
+#   streamlit run app.py
+#
+# หมายเหตุ:
+# - ต้องมี prompt.py และตัวแปร PROMPT_WORKAW
+# - ต้องมี GOOGLE_API_KEY ใน .env หรือ Environment Variables
+
 import os
 import uuid
 import sqlite3
@@ -242,7 +260,7 @@ session_id = st.session_state.session_id
 # =========================
 # 3) LOAD KB (Excel) แบบเดิม
 # =========================
-file_path = r"workaw_data.xlsx"
+file_path = r"C:\Users\Kuck\Documents\AI\demo\workaw_chatbot\workaw\workaw_data.xlsx"
 try:
     df_kb = pd.read_excel(file_path)
     file_content = df_kb.to_string(index=False)
