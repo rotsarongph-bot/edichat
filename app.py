@@ -93,6 +93,7 @@ def db_add_message(session_id: str, role: str, content: str):
 
 
 def db_load_messages(session_id: str, limit: int = 300):
+    """โหลดทั้ง user+model (ใช้ตอนส่งเข้าโมเดล หรือ export)"""
     with db_conn() as conn:
         cur = conn.cursor()
         cur.execute(
@@ -100,6 +101,24 @@ def db_load_messages(session_id: str, limit: int = 300):
             SELECT role, content, ts
             FROM messages
             WHERE session_id=?
+            ORDER BY id ASC
+            LIMIT ?
+            """,
+            (session_id, limit),
+        )
+        rows = cur.fetchall()
+    return [{"role": r, "content": c, "ts": t} for r, c, t in rows]
+
+
+def db_load_user_messages(session_id: str, limit: int = 300):
+    """โหลดเฉพาะ role='user' (ใช้แสดงในหน้าประวัติ)"""
+    with db_conn() as conn:
+        cur = conn.cursor()
+        cur.execute(
+            """
+            SELECT role, content, ts
+            FROM messages
+            WHERE session_id=? AND role='user'
             ORDER BY id ASC
             LIMIT ?
             """,
@@ -120,7 +139,7 @@ def db_list_sessions(limit: int = 50):
     """
     คืนค่าเป็นรายการ session พร้อม:
     - last_ts
-    - user_turns / model_turns
+    - user_turns / model_turns (คงไว้ใน DB แต่ใน UI จะโชว์ user อย่างเดียว)
     - first_question (คำถามแรกของ session)
     """
     with db_conn() as conn:
@@ -249,20 +268,20 @@ with st.sidebar:
 
     st.markdown("---")
 
-    # เลือก session เพื่อดูย้อนหลัง (โชว์คำถามแรกของแต่ละ session)
+    # เลือก session เพื่อดูย้อนหลัง (โชว์คำถามแรกของแต่ละ session + โชว์ count เฉพาะ user)
     sessions = db_list_sessions(limit=50)
     chosen_sid = None
     if sessions:
         st.write("**Recent sessions**")
 
+        # ✅ ปรับ label ให้โชว์ "user:{ut}" อย่างเดียว (ไม่โชว์ model)
         session_choices = [
-            f"📝 {shorten(first_q)} | {last_ts} | user:{ut} model:{mt} | {sid[:8]}…"
+            f"📝 {shorten(first_q)} | {last_ts} | user:{ut} | {sid[:8]}…"
             for sid, first_ts, last_ts, ut, mt, first_q in sessions
         ]
         chosen = st.selectbox("เลือก session เพื่อดูประวัติ", ["(current)"] + session_choices)
 
         if chosen != "(current)":
-            # label ลงท้ายด้วย " | <sid[:8]>…"
             sid_prefix = chosen.split("|")[-1].strip().replace("…", "")
             for sid, *_ in sessions:
                 if sid.startswith(sid_prefix):
@@ -277,7 +296,7 @@ with st.sidebar:
 
     st.markdown("---")
 
-    # ✅ Export CSV แบบเลือกได้
+    # ✅ Export CSV แบบเลือกได้ (ยัง export ทั้ง user+model ตาม DB เหมือนเดิม)
     st.write("**Export CSV**")
     export_mode = st.radio(
         "ต้องการ export อะไร?",
@@ -333,8 +352,8 @@ with st.sidebar:
 # =========================
 view_session_id = st.session_state.get("view_session_id", session_id)
 
-# โหลด messages ของ session ที่เลือกมาดู
-loaded = db_load_messages(view_session_id, limit=5000)
+# ✅ โหลดสำหรับ "ประวัติ" ให้เป็น user-only
+loaded_user_only = db_load_user_messages(view_session_id, limit=5000)
 
 # สร้าง session_state['messages'] สำหรับ session ปัจจุบัน
 if "messages" not in st.session_state:
@@ -347,20 +366,23 @@ if "messages" not in st.session_state:
 # 5) UI: โหมดดูประวัติ / โหมดคุย
 # =========================
 if view_session_id != session_id:
-    st.info(f"กำลังดูประวัติ session: {view_session_id}")
+    st.info(f"กำลังดูประวัติ (แสดงเฉพาะข้อความผู้ใช้) session: {view_session_id}")
+
     if st.button("⬅️ กลับไปคุย (current session)"):
         st.session_state["view_session_id"] = session_id
         st.rerun()
 
-    for msg in loaded:
-        if msg["role"] == "model":
-            st.chat_message("model", avatar=BOT_AVATAR).write(msg["content"])
-        else:
+    # ✅ แสดงเฉพาะ user
+    if not loaded_user_only:
+        st.warning("Session นี้ยังไม่มีข้อความจากผู้ใช้ (user)")
+    else:
+        for msg in loaded_user_only:
             st.chat_message("user", avatar=USER_AVATAR).write(msg["content"])
+
     st.stop()
 
 # =========================
-# 6) แสดงแชทของ current session (ใช้ avatar)
+# 6) แสดงแชทของ current session (คุยจริง: แสดงทั้ง user+model)
 # =========================
 for msg in st.session_state["messages"]:
     if msg["role"] == "model":
@@ -372,8 +394,11 @@ for msg in st.session_state["messages"]:
 # 7) ส่งข้อความ + บันทึกลง DB
 # =========================
 if prompt := st.chat_input():
+    # เพิ่มลง session_state
     st.session_state["messages"].append({"role": "user", "content": prompt})
     st.chat_message("user", avatar=USER_AVATAR).write(prompt)
+
+    # บันทึกลง SQLite (ยังเก็บเหมือนเดิม)
     db_add_message(session_id, "user", prompt)
 
     def generate_response():
@@ -388,7 +413,7 @@ if prompt := st.chat_input():
             st.session_state["messages"].append({"role": "model", "content": reply})
             db_add_message(session_id, "model", reply)
         else:
-            # ✅ ใส่ไฟล์ฐานความรู้เหมือนเดิม (เวอร์ชันที่ตอบดีที่สุดของคุณ)
+            # ✅ ใส่ไฟล์ฐานความรู้เหมือนเดิม (เวอร์ชันที่ตอบดีที่สุด)
             history.insert(1, {"role": "user", "parts": [{"text": file_content}]})
 
             chat_session = model.start_chat(history=history)
@@ -396,6 +421,8 @@ if prompt := st.chat_input():
 
             st.session_state["messages"].append({"role": "model", "content": response.text})
             st.chat_message("model", avatar=BOT_AVATAR).write(response.text)
+
+            # บันทึกคำตอบลง SQLite (ยังเก็บเหมือนเดิม)
             db_add_message(session_id, "model", response.text)
 
     generate_response()
