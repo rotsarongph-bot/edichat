@@ -6,14 +6,13 @@ from io import BytesIO
 import csv
 
 import dotenv
-import google.generativeai as genai
+from openai import OpenAI
 import pandas as pd
 import streamlit as st
-from google.generativeai.types import HarmCategory, HarmBlockThreshold
 
 from prompt import PROMPT_WORKAW
 
-dotenv.load_dotenv()
+dotenv.load_dotenv(override=True)
 
 # =========================
 # AVATAR
@@ -24,33 +23,14 @@ USER_AVATAR = "🧑"
 # =========================
 # 0) CONFIG
 # =========================
-GOOGLE_API_KEY = os.getenv("GOOGLE_API_KEY")
-if not GOOGLE_API_KEY:
-    st.error("❌ ไม่พบ GOOGLE_API_KEY (ตรวจ .env หรือ Environment Variables)")
+OPENROUTER_API_KEY = os.getenv("OPENROUTER_API_KEY")
+if not OPENROUTER_API_KEY:
+    st.error("❌ ไม่พบ OPENROUTER_API_KEY (ตรวจ .env หรือ Environment Variables)")
     st.stop()
 
-genai.configure(api_key=GOOGLE_API_KEY)
-
-generation_config = {
-    "temperature": 0.1,
-    "top_p": 0.95,
-    "top_k": 64,
-    "max_output_tokens": 2048,
-    "response_mime_type": "text/plain",
-}
-
-SAFETY_SETTINGS = {
-    HarmCategory.HARM_CATEGORY_HARASSMENT: HarmBlockThreshold.BLOCK_NONE,
-    HarmCategory.HARM_CATEGORY_HATE_SPEECH: HarmBlockThreshold.BLOCK_NONE,
-    HarmCategory.HARM_CATEGORY_SEXUALLY_EXPLICIT: HarmBlockThreshold.BLOCK_NONE,
-    HarmCategory.HARM_CATEGORY_DANGEROUS_CONTENT: HarmBlockThreshold.BLOCK_NONE,
-}
-
-model = genai.GenerativeModel(
-    model_name="gemini-2.5-flash",
-    safety_settings=SAFETY_SETTINGS,
-    generation_config=generation_config,
-    system_instruction=PROMPT_WORKAW,
+client = OpenAI(
+    base_url="https://openrouter.ai/api/v1",
+    api_key=OPENROUTER_API_KEY,
 )
 
 # =========================
@@ -383,23 +363,30 @@ if prompt := st.chat_input():
     db_add_message(session_id, "user", prompt)
 
     def generate_response():
-        history = [
-            {"role": msg["role"], "parts": [{"text": msg["content"]}]}
-            for msg in st.session_state["messages"]
-        ]
-
         if prompt.lower().startswith("add") or prompt.lower().endswith("add"):
             reply = "ขอบคุณสำหรับคำแนะนำค่ะ"
             st.chat_message("model", avatar=BOT_AVATAR).write(reply)
             st.session_state["messages"].append({"role": "model", "content": reply})
             db_add_message(session_id, "model", reply)
         else:
-            history.insert(1, {"role": "user", "parts": [{"text": file_content}]})
-            chat_session = model.start_chat(history=history)
-            response = chat_session.send_message(prompt)
+            messages = [{"role": "system", "content": f"{PROMPT_WORKAW}\n\n[ข้อมูลอ้างอิง]\n{file_content}"}]
+            
+            for msg in st.session_state["messages"]:
+                role = "assistant" if msg["role"] == "model" else "user"
+                messages.append({"role": role, "content": msg["content"]})
+            
+            response = client.chat.completions.create(
+                model="google/gemini-2.5-flash",
+                messages=messages,
+                temperature=0.1,
+                top_p=0.95,
+                max_tokens=2048,
+            )
+            
+            reply_text = response.choices[0].message.content
 
-            st.session_state["messages"].append({"role": "model", "content": response.text})
-            st.chat_message("model", avatar=BOT_AVATAR).write(response.text)
-            db_add_message(session_id, "model", response.text)
+            st.session_state["messages"].append({"role": "model", "content": reply_text})
+            st.chat_message("model", avatar=BOT_AVATAR).write(reply_text)
+            db_add_message(session_id, "model", reply_text)
 
     generate_response()
