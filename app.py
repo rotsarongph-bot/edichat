@@ -80,7 +80,7 @@ SAFETY_SETTINGS = {
 # =========================
 # 1) LOAD KB (Excel)
 # =========================
-file_path = r"C:\Users\Kuck\Documents\AI\demo\workaw_chatbot\workaw\workaw_data.xlsx"
+file_path = r"workaw_data.xlsx"
 try:
     df_kb = pd.read_excel(file_path)
     file_content = df_kb.to_string(index=False)
