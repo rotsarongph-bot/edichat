@@ -1,122 +1,47 @@
 import os
 import uuid
 import sqlite3
+import csv
 from datetime import datetime
 from io import BytesIO
-import csv
 
 import dotenv
-import google.generativeai as genai
+from openai import OpenAI
 import pandas as pd
 import streamlit as st
-from google.generativeai.types import HarmCategory, HarmBlockThreshold
 
-dotenv.load_dotenv()
+# สมมติว่าในไฟล์ prompt.py ของคุณมีตัวแปร PROMPT_WORKAW
+from prompt import PROMPT_WORKAW
 
 # =========================
-# AVATAR & UI STYLING
+# 0) STREAMLIT CONFIG (ต้องอยู่บนสุด)
+# =========================
+st.set_page_config(page_title="EDI Chatbot", page_icon="💬")
+
+dotenv.load_dotenv(override=True)
+
+# =========================
+# AVATAR
 # =========================
 BOT_AVATAR = "🤖"
 USER_AVATAR = "🧑"
 
-st.set_page_config(page_title="EDI Chatbot", page_icon="💬", layout="wide")
-
-# CSS สำหรับปรับความสวยงามและขยายขนาด Avatar
-st.markdown("""
-<style>
-    /* ขยายขนาดกล่อง Avatar */
-    [data-testid="stChatMessageAvatar"] {
-        width: 3.5rem !important;
-        height: 3.5rem !important;
-        background-color: #f0f2f6;
-        border-radius: 50%;
-        display: flex;
-        align-items: center;
-        justify-content: center;
-    }
-    /* ขยายขนาด Icon/Emoji ข้างใน */
-    [data-testid="stChatMessageAvatar"] div {
-        font-size: 2.2rem !important;
-    }
-    /* ปรับแต่งกล่องข้อความให้สวยขึ้น */
-    .stChatMessage {
-        padding: 1rem;
-        border-radius: 15px;
-        margin-bottom: 10px;
-    }
-    /* ปรับสีพื้นหลังข้อความของ User */
-    [data-testid="stChatMessage"]:nth-child(odd) {
-        background-color: #f9f9f9;
-    }
-</style>
-""", unsafe_allow_html=True)
-
-
 # =========================
-# 0) CONFIG & API
+# 1) CONFIG OPENAI
 # =========================
-GOOGLE_API_KEY = os.getenv("GOOGLE_API_KEY")
-if not GOOGLE_API_KEY:
-    st.error("❌ ไม่พบ GOOGLE_API_KEY (ตรวจ .env หรือ Environment Variables)")
+OPENROUTER_API_KEY = os.getenv("OPENROUTER_API_KEY")
+if not OPENROUTER_API_KEY:
+    st.error("❌ ไม่พบ OPENROUTER_API_KEY (ตรวจ .env หรือ Environment Variables)")
     st.stop()
 
-genai.configure(api_key=GOOGLE_API_KEY)
-
-generation_config = {
-    "temperature": 0.0, # ปรับเป็น 0 เพื่อลดการคิดเอง (ลด Hallucination)
-    "top_p": 0.95,
-    "top_k": 64,
-    "max_output_tokens": 800, # ลดลงจาก 2048 เพื่อประหยัด Token และบังคับให้ไม่ตอบเยิ่นเย้อ
-    "response_mime_type": "text/plain",
-}
-
-SAFETY_SETTINGS = {
-    HarmCategory.HARM_CATEGORY_HARASSMENT: HarmBlockThreshold.BLOCK_NONE,
-    HarmCategory.HARM_CATEGORY_HATE_SPEECH: HarmBlockThreshold.BLOCK_NONE,
-    HarmCategory.HARM_CATEGORY_SEXUALLY_EXPLICIT: HarmBlockThreshold.BLOCK_NONE,
-    HarmCategory.HARM_CATEGORY_DANGEROUS_CONTENT: HarmBlockThreshold.BLOCK_NONE,
-}
-
-# =========================
-# 1) LOAD KB (Excel)
-# =========================
-file_path = r"workaw_data.xlsx"
-try:
-    df_kb = pd.read_excel(file_path)
-    file_content = df_kb.to_string(index=False)
-except Exception as e:
-    st.error(f"❌ ไม่สามารถอ่านไฟล์ Excel ได้: {e}")
-    st.stop()
-
-# =========================
-# 2) PROMPT ENGINEERING (Strict RAG & Concise)
-# =========================
-# รวม Prompt และเนื้อหา Excel เข้าไว้ใน System Instruction
-SYSTEM_INSTRUCTION = f"""
-คุณคือผู้ช่วย AI ชื่อ 'น้องนวัตกรรม' ให้บริการตอบคำถามเกี่ยวกับการรับสมัครงาน/ข้อมูลองค์กร
-คำสั่งสำคัญที่สุดของคุณคือต้องปฏิบัติตามกฎด้านล่างอย่างเคร่งครัด:
-
-1. ให้ตอบคำถามโดยอ้างอิงจาก [ข้อมูลอ้างอิง (Context)] ด้านล่างนี้เท่านั้น
-2. ห้ามคิดคำตอบเอง ห้ามคาดเดา และห้ามใช้ความรู้ภายนอกเด็ดขาด
-3. หากผู้ใช้ถามเรื่องที่ไม่มีใน [ข้อมูลอ้างอิง (Context)] ให้ตอบว่า "ขออภัยค่ะ ไม่มีข้อมูลนี้ในระบบค่ะ" 
-4. หลังจากแจ้งว่าไม่มีข้อมูล ให้เสนอแนะหัวข้อหรือแนวทางคำถามที่มีใน Context เพื่อช่วยเหลือผู้ใช้ เช่น "คุณสามารถสอบถามเกี่ยวกับตำแหน่งที่เปิดรับ, คุณสมบัติ หรือสวัสดิการได้นะคะ"
-5. ตอบกลับด้วยภาษาไทย สุภาพ เป็นทางการแต่น่ารัก และลงท้ายด้วย ค่ะ/คะ เสมอ
-6. สำคัญมาก: ให้คำตอบ "สั้น กระชับ และตรงประเด็นที่สุด" ไม่ต้องอธิบายยืดเยื้อหรือเกริ่นนำยาว เพื่อความรวดเร็วและประหยัด Token
-
-[ข้อมูลอ้างอิง (Context)]
-{file_content}
-"""
-
-model = genai.GenerativeModel(
-    model_name="gemini-2.5-flash",
-    safety_settings=SAFETY_SETTINGS,
-    generation_config=generation_config,
-    system_instruction=SYSTEM_INSTRUCTION,
+# สร้าง Client แบบไม่มี proxies (เพื่อแก้ Error TypeError: Client.__init__() got an unexpected keyword argument 'proxies')
+client = OpenAI(
+    base_url="https://openrouter.ai/api/v1",
+    api_key=OPENROUTER_API_KEY,
 )
 
-
 # =========================
-# 3) SQLITE (Database)
+# 2) SQLITE
 # =========================
 DB_PATH = "workaw_chat.db"
 
@@ -166,24 +91,20 @@ def db_load_messages(session_id: str, limit: int = 300):
         rows = cur.fetchall()
     return [{"role": r, "content": c, "ts": t} for r, c, t in rows]
 
-def db_get_latest_session_id():
-    """ดึง session_id ล่าสุดที่มีการใช้งาน เพื่อให้แชทไม่หายเมื่อรีเฟรชเว็บ"""
-    with db_conn() as conn:
-        cur = conn.cursor()
-        cur.execute("SELECT session_id FROM messages ORDER BY ts DESC LIMIT 1")
-        row = cur.fetchone()
-    return row[0] if row else None
-
 def db_clear_session(session_id: str):
     with db_conn() as conn:
         cur = conn.cursor()
         cur.execute("DELETE FROM messages WHERE session_id=?", (session_id,))
         conn.commit()
 
-def db_list_sessions(limit: int = 50, min_user_turns: int = 1):
-    # แก้ไขเงื่อนไขให้ดึงทุก session ที่มีการคุยของ user ตั้งแต่ 1 ครั้งขึ้นไป (ป้องกันประวัติหายเมื่อคุยยาวขึ้น)
-    where_clause = "WHERE s.user_turns >= ?"
-    params = [min_user_turns, limit]
+def db_list_sessions(limit: int = 50, user_turns_eq: int | None = None):
+    where_clause = ""
+    params = []
+    if user_turns_eq is not None:
+        where_clause = "WHERE s.user_turns = ?"
+        params.append(user_turns_eq)
+
+    params.append(limit)
 
     with db_conn() as conn:
         cur = conn.cursor()
@@ -230,20 +151,30 @@ def db_list_sessions(limit: int = 50, min_user_turns: int = 1):
 
 def db_export_all_as_df():
     with db_conn() as conn:
-        df = pd.read_sql_query("SELECT id, session_id, role, content, ts FROM messages ORDER BY id ASC", conn)
+        df = pd.read_sql_query(
+            "SELECT id, session_id, role, content, ts FROM messages ORDER BY id ASC",
+            conn,
+        )
     return df
 
 def db_export_session_as_df(session_id: str):
     with db_conn() as conn:
         df = pd.read_sql_query(
             "SELECT id, session_id, role, content, ts FROM messages WHERE session_id=? ORDER BY id ASC",
-            conn, params=(session_id,)
+            conn,
+            params=(session_id,),
         )
     return df
 
 def df_to_csv_bytes(df: pd.DataFrame) -> bytes:
     buf = BytesIO()
-    df.to_csv(buf, index=False, encoding="utf-8-sig", quoting=csv.QUOTE_ALL, lineterminator="\n")
+    df.to_csv(
+        buf,
+        index=False,
+        encoding="utf-8-sig",
+        quoting=csv.QUOTE_ALL,
+        lineterminator="\n",
+    )
     return buf.getvalue()
 
 def shorten(text: str, n: int = 42) -> str:
@@ -253,139 +184,178 @@ def shorten(text: str, n: int = 42) -> str:
 init_db()
 
 # =========================
-# 4) INITIALIZE SESSION
+# 3) INITIALIZE APP STATE
 # =========================
 st.title("💬 น้องนวัตกรรม สวัสดีค่ะ")
-st.markdown("ยินดีต้อนรับ! สามารถสอบถามข้อมูลการรับสมัครงานได้เลยค่ะ (ตอบตามข้อมูลที่มีในระบบเท่านั้น)")
 
-# ดึง Session ล่าสุดเสมอ เพื่อไม่ให้ประวัติหายเมื่อรีเฟรช
 if "session_id" not in st.session_state:
-    latest_sid = db_get_latest_session_id()
-    if latest_sid:
-        st.session_state.session_id = latest_sid
-    else:
-        st.session_state.session_id = str(uuid.uuid4())
-
+    st.session_state.session_id = str(uuid.uuid4())
 session_id = st.session_state.session_id
 
-# โหลดข้อความของ session ปัจจุบัน
-if "messages" not in st.session_state:
-    loaded_messages = db_load_messages(session_id)
-    if loaded_messages:
-        # มีประวัติอยู่แล้ว โหลดมาแสดง
-        st.session_state["messages"] = [{"role": msg["role"], "content": msg["content"]} for msg in loaded_messages]
-    else:
-        # ไม่มีประวัติ เริ่มต้นคำทักทายใหม่
-        initial_msg = "สวัสดีค่ะ น้องนวัตกรรมยินดีให้บริการ ต้องการสอบถามข้อมูลการรับสมัครส่วนไหนคะ"
-        st.session_state["messages"] = [{"role": "model", "content": initial_msg}]
-        db_add_message(session_id, "model", initial_msg)
+# =========================
+# 4) LOAD KB (Excel)
+# =========================
+file_path = r"workaw_data.xlsx"
+try:
+    df_kb = pd.read_excel(file_path)
+    file_content = df_kb.to_string(index=False)
+except Exception as e:
+    st.error(f"Error reading file: {e}")
+    st.stop()
 
 # =========================
-# Sidebar & History Management
+# 5) SIDEBAR
 # =========================
 with st.sidebar:
-    st.image("https://cdn-icons-png.flaticon.com/512/4712/4712010.png", width=100) # รูปประดับ Sidebar
-    st.subheader("🧾 ประวัติการแชท (Chat History)")
-    st.caption(f"Session ปัจจุบัน: {session_id[:8]}…")
+    st.subheader("🧾 Chat History (SQLite)")
+    st.caption(f"Current session: {session_id[:8]}…")
 
-    if st.button("🆕 เริ่มบทสนทนาใหม่ (New Session)", use_container_width=True):
-        new_sid = str(uuid.uuid4())
-        st.session_state.session_id = new_sid
-        initial_msg = "สวัสดีค่ะ น้องนวัตกรรมยินดีให้บริการ ต้องการสอบถามข้อมูลการรับสมัครส่วนไหนคะ"
-        st.session_state["messages"] = [{"role": "model", "content": initial_msg}]
-        db_add_message(new_sid, "model", initial_msg)
-        st.session_state["view_session_id"] = new_sid
-        st.rerun()
-
-    if st.button("🗑️ ล้างประวัติ (Clear Current)", use_container_width=True):
+    if st.button("Clear History (this session)"):
         db_clear_session(session_id)
-        st.session_state["messages"] = [{"role": "model", "content": "สวัสดีค่ะ ต้องการสอบถามข้อมูลการรับสมัครส่วนไหนคะ"}]
+        st.session_state["messages"] = [
+            {"role": "model", "content": "สวัสดีค่ะ ต้องการสอบถามข้อมูลการรับสมัครส่วนไหนคะ"}
+        ]
         db_add_message(session_id, "model", "สวัสดีค่ะ ต้องการสอบถามข้อมูลการรับสมัครส่วนไหนคะ")
         st.session_state["view_session_id"] = session_id
         st.rerun()
 
     st.markdown("---")
 
-    # เรียกใช้ฟังก์ชันที่แก้บัคแล้ว (ให้ดึงทุก Session ที่ user มีส่วนร่วม >= 1 ครั้ง)
-    sessions_for_select = db_list_sessions(limit=200, min_user_turns=1)
+    sessions_for_select = db_list_sessions(limit=200, user_turns_eq=1)
     chosen_sid = None
+    
     if sessions_for_select:
-        st.write("**ค้นหาประวัติที่ผ่านมา**")
-        session_choices = [f"📝 {shorten(first_q)} | {sid[:8]}…" for sid, first_ts, last_ts, ut, mt, first_q in sessions_for_select]
-        chosen = st.selectbox("เลือก session เพื่อดูประวัติ", ["(ปัจจุบัน)"] + session_choices)
+        st.write("**Recent sessions**")
+        session_choices = [
+            f"📝 {shorten(first_q)} | {last_ts} | user:{ut} | {sid[:8]}…"
+            for sid, first_ts, last_ts, ut, mt, first_q in sessions_for_select
+        ]
+        chosen = st.selectbox("เลือก session เพื่อดูประวัติ", ["(current)"] + session_choices)
 
-        if chosen != "(ปัจจุบัน)":
+        if chosen != "(current)":
             sid_prefix = chosen.split("|")[-1].strip().replace("…", "")
             for sid, *_ in sessions_for_select:
                 if sid.startswith(sid_prefix):
                     chosen_sid = sid
                     break
 
-            if chosen_sid and st.button("👁️ เปิดดูประวัตินี้", use_container_width=True):
+            if chosen_sid and st.button("👁️ เปิดดู session ที่เลือก"):
                 st.session_state["view_session_id"] = chosen_sid
                 st.rerun()
     else:
-        st.info("ยังไม่มีประวัติแชทอื่น")
+        st.info("ยังไม่มี session ที่ user >= 1")
 
     st.markdown("---")
 
-    st.write("**ดาวน์โหลดข้อมูล (Export CSV)**")
-    export_mode = st.radio("เลือกข้อมูลที่ต้องการ", ["ทั้งหมด (All)", "เฉพาะแชทปัจจุบัน"], index=0)
+    st.write("**Export CSV**")
+    export_mode = st.radio(
+        "ต้องการ export อะไร?",
+        ["All sessions", "Only current session", "Only selected session"],
+        index=0,
+    )
 
-    if export_mode == "ทั้งหมด (All)":
+    if export_mode == "All sessions":
         export_df = db_export_all_as_df()
-        st.download_button("⬇️ ดาวน์โหลด CSV", data=df_to_csv_bytes(export_df), file_name="workaw_chat_ALL.csv", mime="text/csv", use_container_width=True)
-    elif export_mode == "เฉพาะแชทปัจจุบัน":
+        st.download_button(
+            "⬇️ Download CSV (All sessions)",
+            data=df_to_csv_bytes(export_df),
+            file_name="workaw_chat_history_ALL.csv",
+            mime="text/csv",
+        )
+        st.caption(f"Rows: {len(export_df)} | Sessions: {export_df['session_id'].nunique() if len(export_df) else 0}")
+
+    elif export_mode == "Only current session":
         export_df = db_export_session_as_df(session_id)
-        st.download_button("⬇️ ดาวน์โหลด CSV", data=df_to_csv_bytes(export_df), file_name=f"workaw_{session_id[:8]}.csv", mime="text/csv", use_container_width=True)
+        st.download_button(
+            "⬇️ Download CSV (Current session)",
+            data=df_to_csv_bytes(export_df),
+            file_name=f"workaw_chat_{session_id[:8]}_CURRENT.csv",
+            mime="text/csv",
+        )
+        st.caption(f"Rows: {len(export_df)}")
+
+    else:
+        if chosen_sid:
+            export_df = db_export_session_as_df(chosen_sid)
+            st.download_button(
+                "⬇️ Download CSV (Selected session)",
+                data=df_to_csv_bytes(export_df),
+                file_name=f"workaw_chat_{chosen_sid[:8]}_SELECTED.csv",
+                mime="text/csv",
+            )
+            st.caption(f"Rows: {len(export_df)}")
+        else:
+            st.warning("ยังไม่ได้เลือก session (เลือกจาก Recent sessions ก่อน)")
+
+    st.markdown("---")
+
+    st.write("**Quick stats (All)**")
+    all_df = db_export_all_as_df()
+    st.write(f"- Total messages: {len(all_df)}")
+    st.write(f"- Total sessions: {all_df['session_id'].nunique() if len(all_df) else 0}")
+    if len(all_df):
+        st.write(all_df["role"].value_counts())
 
 # =========================
-# 5) VIEW SESSION MODE
+# 6) VIEW SESSION (history)
 # =========================
 view_session_id = st.session_state.get("view_session_id", session_id)
+loaded = db_load_messages(view_session_id, limit=5000)
+
+if "messages" not in st.session_state:
+    st.session_state["messages"] = [
+        {"role": "model", "content": "สวัสดีค่ะ ต้องการสอบถามข้อมูลการรับสมัครส่วนไหนคะ"}
+    ]
+    db_add_message(session_id, "model", "สวัสดีค่ะ ต้องการสอบถามข้อมูลการรับสมัครส่วนไหนคะ")
 
 if view_session_id != session_id:
-    st.warning(f"👁️ โหมดดูประวัติย้อนหลัง (Session: {view_session_id[:8]})")
-    if st.button("⬅️ กลับไปแชทปัจจุบัน", type="primary"):
+    st.info(f"กำลังดูประวัติ session: {view_session_id}")
+    if st.button("⬅️ กลับไปคุย (current session)"):
         st.session_state["view_session_id"] = session_id
         st.rerun()
 
-    loaded_history = db_load_messages(view_session_id, limit=5000)
-    for msg in loaded_history:
-        avatar = BOT_AVATAR if msg["role"] == "model" else USER_AVATAR
-        st.chat_message(msg["role"], avatar=avatar).write(msg["content"])
+    for msg in loaded:
+        if msg["role"] == "model":
+            st.chat_message("model", avatar=BOT_AVATAR).write(msg["content"])
+        else:
+            st.chat_message("user", avatar=USER_AVATAR).write(msg["content"])
     st.stop()
 
 # =========================
-# 6) CURRENT CHAT UI & LOGIC
+# 7) CHAT UI (Current session)
 # =========================
-# แสดงแชทปัจจุบัน
 for msg in st.session_state["messages"]:
-    avatar = BOT_AVATAR if msg["role"] == "model" else USER_AVATAR
-    st.chat_message(msg["role"], avatar=avatar).write(msg["content"])
+    if msg["role"] == "model":
+        st.chat_message("model", avatar=BOT_AVATAR).write(msg["content"])
+    else:
+        st.chat_message("user", avatar=USER_AVATAR).write(msg["content"])
 
-# รับข้อความใหม่
-if prompt := st.chat_input("พิมพ์คำถามของคุณที่นี่..."):
+# =========================
+# 8) CHAT INPUT + GENERATE
+# =========================
+if prompt := st.chat_input():
     st.session_state["messages"].append({"role": "user", "content": prompt})
     st.chat_message("user", avatar=USER_AVATAR).write(prompt)
     db_add_message(session_id, "user", prompt)
 
-    def generate_response():
-        # แปลงประวัติของ Streamlit ให้เป็นรูปแบบที่ Gemini ต้องการ
-        history_gemini = []
-        for msg in st.session_state["messages"][:-1]: # ไม่รวมคำถามล่าสุด
-            history_gemini.append({"role": msg["role"], "parts": [msg["content"]]})
+    if prompt.lower().startswith("add") or prompt.lower().endswith("add"):
+        reply_text = "ขอบคุณสำหรับคำแนะนำค่ะ"
+    else:
+        messages = [{"role": "system", "content": f"{PROMPT_WORKAW}\n\n[ข้อมูลอ้างอิง]\n{file_content}"}]
+        
+        for msg in st.session_state["messages"]:
+            role = "assistant" if msg["role"] == "model" else "user"
+            messages.append({"role": role, "content": msg["content"]})
+        
+        response = client.chat.completions.create(
+            model="google/gemini-2.5-flash",
+            messages=messages,
+            temperature=0.1,
+            top_p=0.95,
+            max_tokens=2048,
+        )
+        reply_text = response.choices[0].message.content
 
-        with st.spinner("น้องนวัตกรรมกำลังพิมพ์..."):
-            try:
-                chat_session = model.start_chat(history=history_gemini)
-                response = chat_session.send_message(prompt)
-                reply_text = response.text
-            except Exception as e:
-                reply_text = f"ขออภัยค่ะ ระบบเกิดข้อผิดพลาด: {str(e)}"
-
-        st.session_state["messages"].append({"role": "model", "content": reply_text})
-        st.chat_message("model", avatar=BOT_AVATAR).write(reply_text)
-        db_add_message(session_id, "model", reply_text)
-
-    generate_response()
+    st.session_state["messages"].append({"role": "model", "content": reply_text})
+    st.chat_message("model", avatar=BOT_AVATAR).write(reply_text)
+    db_add_message(session_id, "model", reply_text)
