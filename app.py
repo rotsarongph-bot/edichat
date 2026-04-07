@@ -81,7 +81,7 @@ except Exception as e:
 # =========================
 # รวม Prompt และเนื้อหา Excel เข้าไว้ใน System Instruction
 SYSTEM_INSTRUCTION = f"""
-คุณคือผู้ช่วย AI ชื่อ 'น้องนวัตกรรม' ให้บริการตอบคำถามเกี่ยวกับการรับสมัครงาน/ข้อมูลองค์กร
+คุณคือผู้ช่วย AI ชื่อ 'น้องนวัตกรรม' ให้บริการตอบคำถามเกี่ยวกับการรับสมัคร/ข้อมูลคณะศึกษาศาสตร์และนวัตกรรมการศึกษา
 คำสั่งสำคัญที่สุดของคุณคือต้องปฏิบัติตามกฎด้านล่างอย่างเคร่งครัด:
 
 1. ให้ตอบคำถามโดยอ้างอิงจาก [ข้อมูลอ้างอิง (Context)] ด้านล่างนี้เท่านั้น
@@ -239,7 +239,7 @@ init_db()
 # 4) INITIALIZE SESSION
 # =========================
 st.title("💬 น้องนวัตกรรม สวัสดีค่ะ")
-st.markdown("ยินดีต้อนรับ! สามารถสอบถามข้อมูลการรับสมัครงานได้เลยค่ะ (ตอบตามข้อมูลที่มีในระบบเท่านั้น)")
+st.markdown("ยินดีต้อนรับ! สามารถสอบถามข้อมูลการรับสมัคร / ข้อมูลคณะศึกษาศาสตร์และนวัตกรรมการศึกษา ได้เลยค่ะ")
 
 # ดึง Session ล่าสุดเสมอ เพื่อไม่ให้ประวัติหายเมื่อรีเฟรช
 if "session_id" not in st.session_state:
@@ -259,7 +259,7 @@ if "messages" not in st.session_state:
         st.session_state["messages"] = [{"role": msg["role"], "content": msg["content"]} for msg in loaded_messages]
     else:
         # ไม่มีประวัติ เริ่มต้นคำทักทายใหม่
-        initial_msg = "สวัสดีค่ะ น้องนวัตกรรมยินดีให้บริการ ต้องการสอบถามข้อมูลการรับสมัครส่วนไหนคะ"
+        initial_msg = "สวัสดีค่ะ น้องนวัตกรรมยินดีให้บริการ ต้องการสอบถามข้อมูลการรับสมัคร / ข้อมูลคณะศึกษาศาสตร์และนวัตกรรมการศึกษา ส่วนไหนคะ"
         st.session_state["messages"] = [{"role": "model", "content": initial_msg}]
         db_add_message(session_id, "model", initial_msg)
 
@@ -274,7 +274,7 @@ with st.sidebar:
     if st.button("🆕 เริ่มบทสนทนาใหม่ (New Session)", use_container_width=True):
         new_sid = str(uuid.uuid4())
         st.session_state.session_id = new_sid
-        initial_msg = "สวัสดีค่ะ น้องนวัตกรรมยินดีให้บริการ ต้องการสอบถามข้อมูลการรับสมัครส่วนไหนคะ"
+        initial_msg = "สวัสดีค่ะ น้องนวัตกรรมยินดีให้บริการ ต้องการสอบถามข้อมูลการรับสมัคร / ข้อมูลคณะศึกษาศาสตร์และนวัตกรรมการศึกษา ส่วนไหนคะ"
         st.session_state["messages"] = [{"role": "model", "content": initial_msg}]
         db_add_message(new_sid, "model", initial_msg)
         st.session_state["view_session_id"] = new_sid
@@ -282,8 +282,8 @@ with st.sidebar:
 
     if st.button("🗑️ ล้างประวัติ (Clear Current)", use_container_width=True):
         db_clear_session(session_id)
-        st.session_state["messages"] = [{"role": "model", "content": "สวัสดีค่ะ ต้องการสอบถามข้อมูลการรับสมัครส่วนไหนคะ"}]
-        db_add_message(session_id, "model", "สวัสดีค่ะ ต้องการสอบถามข้อมูลการรับสมัครส่วนไหนคะ")
+        st.session_state["messages"] = [{"role": "model", "content": "สวัสดีค่ะ ต้องการสอบถามข้อมูลการรับสมัคร / ข้อมูลคณะศึกษาศาสตร์และนวัตกรรมการศึกษา ส่วนไหนคะ"}]
+        db_add_message(session_id, "model", "สวัสดีค่ะ ต้องการสอบถามข้อมูลการรับสมัคร  / ข้อมูลคณะศึกษาศาสตร์และนวัตกรรมการศึกษา ส่วนไหนคะ")
         st.session_state["view_session_id"] = session_id
         st.rerun()
 
